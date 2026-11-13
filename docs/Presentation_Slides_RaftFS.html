@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RaftFS — Presentation Slides</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #070a13;
+      --card-bg: rgba(17, 24, 39, 0.75);
+      --primary: #38bdf8;
+      --gold: #f59e0b;
+      --green: #10b981;
+      --red: #f43f5e;
+      --border: rgba(255, 255, 255, 0.1);
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      overflow: hidden;
+      padding: 20px;
+    }
+
+    /* Presentation Deck Container */
+    .deck-container {
+      width: 100%;
+      max-width: 1100px;
+      height: 640px;
+      background: var(--card-bg);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6), 0 0 40px rgba(56, 189, 248, 0.1);
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Slide Header / Tracker */
+    .deck-header {
+      padding: 20px 32px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+
+    .brand-tag {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: #fff;
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.1rem;
+      font-weight: 700;
+    }
+
+    .slide-number-pill {
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--primary);
+      padding: 4px 12px;
+      border-radius: 9999px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+    }
+
+    /* Slide Body */
+    .slide-content {
+      flex: 1;
+      padding: 40px 48px;
+      display: none;
+      flex-direction: column;
+      justify-content: center;
+      animation: fadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .slide-content.active {
+      display: flex;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .slide-title {
+      font-family: 'Outfit', sans-serif;
+      font-size: 2.2rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin-bottom: 8px;
+      background: linear-gradient(135deg, #fff 40%, var(--primary));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .slide-subtitle {
+      font-size: 1.05rem;
+      color: var(--text-muted);
+      margin-bottom: 28px;
+    }
+
+    /* Content Layouts */
+    .grid-2col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+    }
+
+    .grid-3col {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 20px;
+    }
+
+    .feature-box {
+      background: rgba(9, 13, 22, 0.6);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 22px;
+      transition: all 0.2s ease;
+    }
+
+    .feature-box:hover {
+      border-color: rgba(56, 189, 248, 0.4);
+      transform: translateY(-2px);
+    }
+
+    .feature-icon {
+      font-size: 28px;
+      margin-bottom: 10px;
+    }
+
+    .feature-head {
+      font-family: 'Outfit', sans-serif;
+      font-weight: 700;
+      font-size: 1.1rem;
+      color: #fff;
+      margin-bottom: 6px;
+    }
+
+    .feature-desc {
+      font-size: 0.88rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+
+    .code-snippet {
+      background: #040711;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 20px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.82rem;
+      color: #38bdf8;
+      line-height: 1.6;
+    }
+
+    ul.bullet-list {
+      list-style: none;
+    }
+
+    ul.bullet-list li {
+      position: relative;
+      padding-left: 24px;
+      margin-bottom: 12px;
+      font-size: 0.95rem;
+      color: #cbd5e1;
+      line-height: 1.5;
+    }
+
+    ul.bullet-list li::before {
+      content: "▹";
+      position: absolute;
+      left: 0;
+      color: var(--primary);
+      font-weight: 700;
+      font-size: 1.1rem;
+    }
+
+    /* Deck Footer / Controls */
+    .deck-footer {
+      padding: 16px 32px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-top: 1px solid var(--border);
+      background: rgba(9, 13, 22, 0.4);
+    }
+
+    .nav-hints {
+      font-size: 0.8rem;
+      color: #64748b;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .kbd {
+      background: rgba(255, 255, 255, 0.1);
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-family: 'JetBrains Mono', monospace;
+      color: #94a3b8;
+    }
+
+    .btn-nav-group {
+      display: flex;
+      gap: 10px;
+    }
+
+    .btn-nav {
+      background: rgba(56, 189, 248, 0.15);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      color: var(--primary);
+      font-family: 'Outfit', sans-serif;
+      font-weight: 700;
+      padding: 8px 18px;
+      border-radius: 10px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s ease;
+    }
+
+    .btn-nav:hover {
+      background: var(--primary);
+      color: #070a13;
+    }
+
+    .btn-nav:disabled {
+      opacity: 0.3;
+      cursor: not-allowed;
+    }
+
+    /* Title Slide Special */
+    .title-slide {
+      text-align: center;
+      align-items: center;
+    }
+
+    .title-badge {
+      display: inline-block;
+      font-size: 0.8rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--primary);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      padding: 6px 16px;
+      border-radius: 9999px;
+      margin-bottom: 20px;
+    }
+
+    .hero-title {
+      font-family: 'Outfit', sans-serif;
+      font-size: 3.2rem;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      line-height: 1.1;
+      margin-bottom: 16px;
+      background: linear-gradient(135deg, #fff 30%, var(--primary) 70%, #818cf8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .hero-meta {
+      font-size: 1rem;
+      color: #94a3b8;
+      max-width: 650px;
+      margin-bottom: 30px;
+      line-height: 1.6;
+    }
+
+    .team-badge {
+      display: flex;
+      gap: 20px;
+      font-size: 0.85rem;
+      color: #cbd5e1;
+      background: rgba(255, 255, 255, 0.04);
+      padding: 8px 24px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+
+  <div class="deck-container">
+    <!-- Header -->
+    <div class="deck-header">
+      <div class="brand-tag">
+        <span>🌐</span> RaftFS Distributed Architecture
+      </div>
+      <div class="slide-number-pill" id="slideIndicator">Slide 1 / 10</div>
+    </div>
+
+    <!-- Slide 1: Title Slide -->
+    <div class="slide-content title-slide active">
+      <div class="title-badge">Cloud & Distributed Computing Project</div>
+      <h1 class="hero-title">RaftFS Storage Cluster</h1>
+      <p class="hero-meta">
+        A Fault-Tolerant Distributed Document Storage Engine & Parallel MapReduce Computation Framework with Interactive 3D Consensus Topology.
+      </p>
+      <div class="team-badge">
+        <span><b>Domain:</b> Distributed Systems</span>
+        <span>•</span>
+        <span><b>Protocol:</b> Raft Consensus</span>
+        <span>•</span>
+        <span><b>Tech:</b> Node.js & Three.js</span>
+      </div>
+    </div>
+
+    <!-- Slide 2: Problem Statement -->
+    <div class="slide-content">
+      <h2 class="slide-title">The Real-World Problem</h2>
+      <p class="slide-subtitle">Why traditional centralized architectures fail in production environments</p>
+      
+      <div class="grid-3col">
+        <div class="feature-box">
+          <div class="feature-icon">💥</div>
+          <div class="feature-head">Single Point of Failure</div>
+          <div class="feature-desc">Centralized storage servers (monoliths) bring entire applications down when hardware crashes or reboots.</div>
+        </div>
+        <div class="feature-box">
+          <div class="feature-icon">🧠</div>
+          <div class="feature-head">Split-Brain Hazard</div>
+          <div class="feature-desc">Naive multi-server setups risk accepting conflicting writes during network partitions, corrupting data.</div>
+        </div>
+        <div class="feature-box">
+          <div class="feature-icon">⏳</div>
+          <div class="feature-head">Sequential Bottlenecks</div>
+          <div class="feature-desc">Searching through gigabytes of documents sequentially on a single CPU core freezes web applications.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Slide 3: Raft Consensus -->
+    <div class="slide-content">
+      <h2 class="slide-title">The Solution: Raft Consensus Protocol</h2>
+      <p class="slide-subtitle">Guaranteed Strong Consistency ($CP$) and automated fault recovery</p>
+      
+      <div class="grid-2col">
+        <div>
+          <ul class="bullet-list">
+            <li><b>Leader Election:</b> Randomized election timeouts ($1500\text{ms} - 3000\text{ms}$) prevent split votes and guarantee exactly one coordinator.</li>
+            <li><b>Log Replication:</b> State transitions (file writes/deletes) are broadcast via <code style="color:var(--primary)">AppendEntries</code> RPCs.</li>
+            <li><b>Strict Quorum Majority:</b> Writes only commit when confirmed by:
+              $$\text{Quorum} = \lfloor N/2 \rfloor + 1$$
+            </li>
+            <li><b>Safety Invariant:</b> Nodes with out-of-date logs are mathematically barred from winning leadership elections.</li>
+          </ul>
+        </div>
+        <div class="code-snippet">
+// Raft Quorum Check in RaftFS
+const majority = Math.floor(totalNodes / 2) + 1;
+const isQuorumReached = 
+  acknowledgedFollowers >= majority;
+
+if (isQuorumReached) {
+  this.commitIndex = this.log.length - 1;
+  this.docStore.saveDocument(meta, content);
+  // Replicated safely to disk!
+}
+        </div>
+      </div>
+    </div>
+
+    <!-- Slide 4: System Architecture -->
+    <div class="slide-content">
+      <h2 class="slide-title">Decoupled Dual-Port Node Architecture</h2>
+      <p class="slide-subtitle">Clean separation of consensus networking from public client traffic</p>
+      
+      <div class="grid-2col">
+        <div class="feature-box">
+          <div class="feature-head" style="color: var(--primary);">1. Consensus Plane (Ports 7000–7003+)</div>
+          <p class="feature-desc" style="margin-bottom: 12px;">High-frequency private RPC channel solely between cluster nodes:</p>
+          <ul class="bullet-list" style="font-size: 0.85rem;">
+            <li><code style="color:#fff;">/append-entries</code>: Periodic heartbeats & Base64 document payload batches.</li>
+            <li><code style="color:#fff;">/request-vote</code>: Candidate election ballots with log completeness checks.</li>
+          </ul>
+        </div>
+        <div class="feature-box">
+          <div class="feature-head" style="color: var(--green);">2. Client / Storage Plane (Ports 5000–5003+)</div>
+          <p class="feature-desc" style="margin-bottom: 12px;">Public REST endpoints for application traffic & monitoring:</p>
+          <ul class="bullet-list" style="font-size: 0.85rem;">
+            <li><code style="color:#fff;">/api/documents/upload</code>: Replicated write pipeline.</li>
+            <li><code style="color:#fff;">/api/search</code>: Local Map query execution.</li>
+            <li><code style="color:#fff;">/api/status</code>: Real-time telemetry (Term, role, storage).</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- Slide 5: Document Replication Pipeline -->
+    <div class="slide-content">
+      <h2 class="slide-title">Distributed Document Replication Lifecycle</h2>
+      <p class="slide-subtitle">How a file travels from client drag-and-drop to persistent disk quorum</p>
+      
+      <div class="grid-3col">
+        <div class="feature-box">
+          <div class="feature-head">Step 1: Ingestion & Hash</div>
+          <p class="feature-desc">Cluster Gateway routes file to active <b>Leader 👑</b>. The Leader computes a <b>SHA-256</b> checksum to ensure data integrity.</p>
+        </div>
+        <div class="feature-box">
+          <div class="feature-head">Step 2: AppendEntries RPC</div>
+          <p class="feature-desc">Leader wraps payload into a <code style="color:var(--primary)">DocUpload</code> log entry and broadcasts it to all active follower nodes in parallel.</p>
+        </div>
+        <div class="feature-box">
+          <div class="feature-head">Step 3: Quorum Commit</div>
+          <p class="feature-desc">Once $\ge 2/3$ nodes confirm receipt, the entry is committed to isolated disk folders (<code style="color:#fff;">storage/node_X/</code>).</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Slide 6: Distributed MapReduce -->
+    <div class="slide-content">
+      <h2 class="slide-title">Distributed MapReduce Search Engine</h2>
+      <p class="slide-subtitle">Executing parallel text queries across decentralized storage shards</p>
+      
+      <div class="grid-2col">
+        <div class="feature-box">
+          <div class="feature-head" style="color: var(--gold);">Phase 1: Parallel Map Broadcast</div>
+          <p class="feature-desc">When a search query is submitted, the coordinator simultaneously broadcasts the query string to <b>all live nodes</b>.</p>
+          <p class="feature-desc" style="margin-top: 8px;">Each node parses its local files in parallel, scanning lines and extracting match snippets.</p>
+        </div>
+        <div class="feature-box">
+          <div class="feature-head" style="color: var(--primary);">Phase 2: Aggregated Reduce</div>
+          <p class="feature-desc">The coordinator collects incoming match streams, eliminates redundant replica occurrences, and measures end-to-end latency.</p>
+          <div class="code-snippet" style="margin-top: 10px; font-size: 0.78rem;">
+// Benchmark on 3-Node Cluster:
+Map Broadcast: Nodes [0, 1, 2]
+Execution Time: ~11ms - 35ms
+Accuracy: 100% deduplicated
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Slide 7: Elastic Scaling -->
+    <div class="slide-content">
+      <h2 class="slide-title">Elastic Dynamic Scaling (Membership)</h2>
+      <p class="slide-subtitle">Runtime cluster expansion and contraction without downtime</p>
+      
+      <div class="grid-2col">
+        <div class="feature-box">
+          <div class="feature-head">➕ Scale-Up (Add Storage Node)</div>
+          <ul class="bullet-list" style="font-size: 0.88rem;">
+            <li>Spawns a new independent Node process dynamically (e.g. Node 3 on Client :5003 / Raft :7003).</li>
+            <li>Broadcasts updated membership list to existing nodes over <code style="color:var(--primary)">/api/cluster/update-members</code>.</li>
+            <li>New node joins the 3D ring, receives heartbeats, and joins the consensus quorum!</li>
+          </ul>
+        </div>
+        <div class="feature-box">
+          <div class="feature-head">➖ Scale-Down (Remove Node)</div>
+          <ul class="bullet-list" style="font-size: 0.88rem;">
+            <li>Safely shuts down the child process.</li>
+            <li>Purges the node from active cluster topology.</li>
+            <li>Automatically recalculates the majority quorum requirement $\lfloor N/2 \rfloor + 1$.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- Slide 8: 3D Visualization -->
+    <div class="slide-content">
+      <h2 class="slide-title">Interactive 3D WebGL Visualization</h2>
+      <p class="slide-subtitle">Spatial real-time monitoring powered by Three.js</p>
+      
+      <div class="grid-3col">
+        <div class="feature-box">
+          <div class="feature-head" style="color: var(--gold);">👑 Leader Sphere</div>
+          <p class="feature-desc">Highlighted with a radiating golden core, enlarged metallic radius, and dynamic orbit ring.</p>
+        </div>
+        <div class="feature-box">
+          <div class="feature-head" style="color: var(--primary);">⚡ Consensus Beams</div>
+          <p class="feature-desc">Animated pulsing laser vectors connect Leader to all active Followers in real 3D space, showing active RPC traffic.</p>
+        </div>
+        <div class="feature-box">
+          <div class="feature-head" style="color: var(--red);">💀 Chaos Visualizer</div>
+          <p class="feature-desc">Crashed nodes extinguish immediately to crimson red; recovering nodes transition back to cyan in real time.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Slide 9: Live Demo & Verification -->
+    <div class="slide-content">
+      <h2 class="slide-title">Experimental Validation & Live Demo</h2>
+      <p class="slide-subtitle">Five concrete test scenarios designed for evaluators and viva defense</p>
+      
+      <ul class="bullet-list" style="font-size: 0.95rem;">
+        <li><b>Test 1 (Consensus Election):</b> Clean boot elects 1 Leader; followers synchronize on Term 1.</li>
+        <li><b>Test 2 (Replicated Write):</b> Document uploaded & physically verified in <code style="color:var(--primary)">storage/node_0</code>, <code style="color:var(--primary)">storage/node_1</code>, <code style="color:var(--primary)">storage/node_2</code>.</li>
+        <li><b>Test 3 (Parallel Search):</b> MapReduce query broadcast to all nodes simultaneously; results reduced in ~15ms.</li>
+        <li><b>Test 4 (Chaos Crash):</b> Click <code style="color:var(--red);">⚡ Crash Node</code> on Leader &rarr; followers detect dead heartbeat and elect new Leader in &lt;1.8s!</li>
+        <li><b>Test 5 (Elastic Scaling):</b> Click <code style="color:var(--green);">➕ Add Node</code> &rarr; Node 4 animates into 3D mesh and updates quorum dynamically.</li>
+      </ul>
+    </div>
+
+    <!-- Slide 10: Conclusion -->
+    <div class="slide-content title-slide">
+      <div class="title-badge" style="background: rgba(16, 185, 129, 0.15); color: var(--green); border-color: rgba(16, 185, 129, 0.3);">Project Defense Complete</div>
+      <h1 class="hero-title" style="font-size: 2.8rem;">Thank You! Questions?</h1>
+      <p class="hero-meta">
+        RaftFS bridges foundational distributed consensus theory with tangible, production-grade cloud software engineering and interactive 3D visualization.
+      </p>
+      <div class="team-badge">
+        <span><b>Repository:</b> D:\CDC_Project\raft-node</span>
+        <span>•</span>
+        <span><b>Status:</b> Production Ready</span>
+      </div>
+    </div>
+
+    <!-- Footer Controls -->
+    <div class="deck-footer">
+      <div class="nav-hints">
+        <span>Navigate: <span class="kbd">←</span> <span class="kbd">→</span> or <span class="kbd">Space</span></span>
+      </div>
+      <div class="btn-nav-group">
+        <button class="btn-nav" id="prevBtn" onclick="changeSlide(-1)">◀ Previous</button>
+        <button class="btn-nav" id="nextBtn" onclick="changeSlide(1)">Next ▶</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const slides = document.querySelectorAll('.slide-content');
+    const indicator = document.getElementById('slideIndicator');
+    const prevBtn = document.getElementById('prevBtn');
+    const nextBtn = document.getElementById('nextBtn');
+    let currentIndex = 0;
+
+    function updateSlide() {
+      slides.forEach((s, i) => {
+        s.classList.toggle('active', i === currentIndex);
+      });
+      indicator.innerText = `Slide ${currentIndex + 1} / ${slides.length}`;
+      prevBtn.disabled = currentIndex === 0;
+      nextBtn.disabled = currentIndex === slides.length - 1;
+    }
+
+    function changeSlide(direction) {
+      currentIndex = Math.max(0, Math.min(slides.length - 1, currentIndex + direction));
+      updateSlide();
+    }
+
+    // Keyboard Navigation
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') {
+        changeSlide(1);
+      } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
+        changeSlide(-1);
+      }
+    });
+
+    updateSlide();
+  </script>
+</body>
+</html>

@@ -8,10 +8,13 @@ const node = new RaftNode({
   port,
   index,
   servers: servers.map((s, i) => {
+    const p = Number(s.split(":")[2]);
+    const derivedIndex = p >= 7000 ? p - 7000 : i;
     return {
-      index: i,
+      index: derivedIndex,
       address: s,
-      port: Number(s.split(":")[2]),
+      port: p,
+      clientPort: 5000 + derivedIndex,
     };
   }),
 });

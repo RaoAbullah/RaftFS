@@ -1,22 +1,29 @@
-import * as express from "express";
+import express from "express";
+import cors from "cors";
+import multer from "multer";
+import * as crypto from "node:crypto";
 import { Store } from "./state-machine";
+import { DocumentStore, DocumentMetadata, SearchMatch } from "./document-store";
 
-enum State {
-  Follower,
-  Candidate,
-  Leader,
+export enum State {
+  Follower = "Follower",
+  Candidate = "Candidate",
+  Leader = "Leader",
 }
 
 export interface ServerConfig {
   address: string;
   port: number;
   index: number;
+  clientPort?: number;
 }
 
 export enum LogType {
   Beat = "Beat",
   Set = "Set",
   Del = "Del",
+  DocUpload = "DocUpload",
+  DocDelete = "DocDelete",
 }
 
 export interface LogEntry {
@@ -33,6 +40,7 @@ interface AppendEntriesParams {
   prevLogTerm: number;
   entries: LogEntry[];
   leaderCommit: number;
+  leaderDocCount?: number;
 }
 
 interface RequestVoteParams {
@@ -42,33 +50,44 @@ interface RequestVoteParams {
   lastLogTerm: number;
 }
 
-const APPEND_ENTRIES_PATH = "/append-entries",
-  REQUEST_VOTE_PATH = "/request-vote";
+const APPEND_ENTRIES_PATH = "/append-entries";
+const REQUEST_VOTE_PATH = "/request-vote";
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB max per file
+});
 
 export class RaftNode {
   state: State = State.Follower;
   currentTerm: number = 0;
   votedFor: number | null = null;
+  leaderId: number | null = null;
   log: LogEntry[] = [];
 
   // volatile
   commitIndex: number = 0;
   lastApplied: number = 0;
 
-  // for servers
-  nextIndex: Record<number, number>;
-  matchIndex: Record<number, number>;
+  // for leader
+  nextIndex: Record<number, number> = {};
+  matchIndex: Record<number, number> = {};
 
   // internals
   private _index: number;
   private _servers: ServerConfig[];
   private _store: Store;
+  private _docStore: DocumentStore;
   private _expressRaft: express.Express = express();
-  private _expressKV: express.Express = express();
-  private _portKV: number;
+  private _expressClient: express.Express = express();
+  private _portClient: number;
   private _raftPort: number;
   private _leaderElectionTimeout: NodeJS.Timeout | null = null;
   private _heartbeatTimeout: NodeJS.Timeout | null = null;
+  private _isSyncing: boolean = false;
+
+  // Chaos simulation
+  private _simulatedLatencyMs: number = 0;
 
   constructor({
     port,
@@ -81,104 +100,339 @@ export class RaftNode {
   }) {
     this._index = index;
     this._servers = servers;
-    this._portKV = port;
-    this._raftPort = servers[index].port;
+    this._portClient = port;
+    const selfServer = servers.find((s) => s.index === index);
+    this._raftPort = selfServer ? selfServer.port : 7000 + index;
 
     this.log.push({
       type: LogType.Beat,
       args: [],
-      index: this.log.length,
+      index: 0,
       term: this.currentTerm,
     });
 
     this._store = new Store();
-    console.log(port, index, servers);
+    this._docStore = new DocumentStore(index);
+
+    // Reconstruct in-memory log from persisted documents
+    const existingDocs = this._docStore.listDocuments();
+    for (const meta of existingDocs) {
+      const doc = this._docStore.getDocument(meta.fileId);
+      if (doc) {
+        this.log.push({
+          type: LogType.DocUpload,
+          args: [meta.fileId, JSON.stringify(meta), doc.buffer.toString("base64")],
+          index: this.log.length,
+          term: this.currentTerm,
+        });
+      }
+    }
+    this.commitIndex = this.log.length - 1;
+    this.lastApplied = this.commitIndex;
+
     this.setupRaftHandler();
     this._expressRaft.listen(this._raftPort, () => {
-      this.logToConsole("Started raft server");
+      this.logToConsole(`Started Raft consensus server on port ${this._raftPort}`);
       this.resetLeaderElectionTimeout();
     });
 
-    this.setupKVHandler();
-    this._expressKV.listen(this._portKV, () => {
-      this.logToConsole("Started KV server");
+    this.setupClientHandler();
+    this._expressClient.listen(this._portClient, () => {
+      this.logToConsole(`Started Client API / Storage server on port ${this._portClient}`);
     });
   }
 
-  cleanup() {
-    if (this._heartbeatTimeout) {
-      clearTimeout(this._heartbeatTimeout);
-    }
-
-    if (this._leaderElectionTimeout) {
-      clearTimeout(this._leaderElectionTimeout);
-    }
+  public cleanup() {
+    if (this._heartbeatTimeout) clearTimeout(this._heartbeatTimeout);
+    if (this._leaderElectionTimeout) clearTimeout(this._leaderElectionTimeout);
   }
 
   private logToConsole(...args: unknown[]) {
-    console.log(`Node ${this._index}: `, ...args);
+    console.log(`[Node ${this._index} | ${this.state} | Term ${this.currentTerm}]:`, ...args);
   }
 
-  get address() {
-    return `http://localhost:${this._portKV}`;
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  private setupKVHandler() {
-    this._expressKV.use(express.json());
-    this._expressKV.get("/get", (req, res) => {
-      const key = req.query.key as string;
-      if (!key) {
-        res.status(400).send("Key not provided");
+  // Fast catch-up state synchronization from Leader
+  private async syncFromLeader(leaderId: number) {
+    if (this._isSyncing || this.state === State.Leader) return;
+    this._isSyncing = true;
+    try {
+      const leaderConfig = this._servers.find((s) => s.index === leaderId);
+      const clientPort = leaderConfig?.clientPort || (5000 + leaderId);
+      const res = await fetch(`http://localhost:${clientPort}/api/documents/sync-all`, {
+        signal: AbortSignal.timeout(3500),
+      });
+
+      if (res.ok) {
+        const data = (await res.json()) as {
+          nodeIndex: number;
+          docCount: number;
+          documents: Array<{ meta: DocumentMetadata; contentBase64: string }>;
+        };
+
+        if (data && Array.isArray(data.documents)) {
+          let addedCount = 0;
+          for (const item of data.documents) {
+            if (!item.meta || !item.contentBase64) continue;
+            const existing = this._docStore.getDocument(item.meta.fileId);
+            if (!existing) {
+              this._docStore.saveDocument(item.meta, item.contentBase64);
+              const alreadyInLog = this.log.some(
+                (l) => l.type === LogType.DocUpload && l.args[0] === item.meta.fileId
+              );
+              if (!alreadyInLog) {
+                this.log.push({
+                  type: LogType.DocUpload,
+                  args: [item.meta.fileId, JSON.stringify(item.meta), item.contentBase64],
+                  index: this.log.length,
+                  term: this.currentTerm,
+                });
+              }
+              addedCount++;
+            }
+          }
+          if (addedCount > 0) {
+            this.commitIndex = this.log.length - 1;
+            this.logToConsole(`🔄 Catch-up Sync: retrieved ${addedCount} documents from Leader (Node ${leaderId}). Total docs: ${this._docStore.listDocuments().length}`);
+          }
+        }
       }
-      this.logToConsole(this._store.get(key));
-      res.send({
-        data: this._store.get(key) || "",
+    } catch {
+      // Leader not yet ready or network busy
+    } finally {
+      this._isSyncing = false;
+    }
+  }
+
+  private setupClientHandler() {
+    this._expressClient.use(cors());
+    this._expressClient.use(express.json({ limit: "50mb" }));
+
+    // Status endpoint for dashboard
+    this._expressClient.get("/api/status", (_req, res) => {
+      const stats = this._docStore.getStorageStats();
+      res.json({
+        nodeIndex: this._index,
+        state: this.state,
+        currentTerm: this.currentTerm,
+        votedFor: this.votedFor,
+        leaderId: this.leaderId,
+        commitIndex: this.commitIndex,
+        logLength: this.log.length,
+        clientPort: this._portClient,
+        raftPort: this._raftPort,
+        storageStats: stats,
+        simulatedLatencyMs: this._simulatedLatencyMs,
+        clusterSize: this._servers.length,
+        isAlive: true,
       });
     });
 
-    this._expressKV.post("/set", async (req, res) => {
-      if (this.state !== State.Leader) {
-        res.status(400).send("This node is not the leader, cannot set");
-        return;
+    // Dynamic membership update endpoint
+    this._expressClient.post("/api/cluster/update-members", (req, res) => {
+      const { servers } = req.body as { servers: ServerConfig[] };
+      if (Array.isArray(servers) && servers.length > 0) {
+        this._servers = servers;
+        this.logToConsole(`Updated membership list: ${servers.length} nodes registered.`);
+
+        if (this.state === State.Leader) {
+          for (const s of servers) {
+            if (s.index !== this._index && this.nextIndex[s.index] === undefined) {
+              this.nextIndex[s.index] = 1;
+            }
+          }
+          this.heartbeat();
+        } else if (this.leaderId !== null && this.leaderId !== this._index) {
+          this.syncFromLeader(this.leaderId);
+        }
+
+        res.json({ success: true, count: servers.length });
+      } else {
+        res.status(400).json({ error: "Invalid servers list" });
       }
-      const key = req.query.key as string,
-        value = req.query.value as string;
-      if (!key || !value) {
-        res.status(400).send("Key and value required");
+    });
+
+    // Proactive full document sync for lagging / newly joined nodes
+    this._expressClient.get("/api/documents/sync-all", (_req, res) => {
+      const docs = this._docStore.listDocuments();
+      const fullDocs = docs.map((meta) => {
+        const doc = this._docStore.getDocument(meta.fileId);
+        return {
+          meta,
+          contentBase64: doc ? doc.buffer.toString("base64") : "",
+        };
+      });
+      res.json({
+        nodeIndex: this._index,
+        term: this.currentTerm,
+        commitIndex: this.commitIndex,
+        docCount: fullDocs.length,
+        documents: fullDocs,
+      });
+    });
+
+    // List documents stored on this node
+    this._expressClient.get("/api/documents", (_req, res) => {
+      const docs = this._docStore.listDocuments();
+      res.json({
+        nodeIndex: this._index,
+        documents: docs,
+      });
+    });
+
+    // Download document from this node
+    this._expressClient.get("/api/documents/:fileId", (req, res) => {
+      const fileId = req.params.fileId;
+      const doc = this._docStore.getDocument(fileId);
+      if (!doc) {
+        res.status(404).json({ error: "Document not found on this node" });
         return;
       }
 
+      res.setHeader("Content-Disposition", `attachment; filename="${doc.meta.fileName}"`);
+      res.setHeader("Content-Type", doc.meta.mimeType || "application/octet-stream");
+      res.send(doc.buffer);
+    });
+
+    // Verify document integrity
+    this._expressClient.get("/api/documents/:fileId/integrity", (req, res) => {
+      const check = this._docStore.verifyIntegrity(req.params.fileId);
+      res.json(check);
+    });
+
+    // MapReduce Search (Map step on this node)
+    this._expressClient.get("/api/search", (req, res) => {
+      const query = (req.query.q as string) || "";
+      const matches: SearchMatch[] = this._docStore.search(query);
+      res.json({
+        nodeIndex: this._index,
+        query,
+        matches,
+      });
+    });
+
+    // Upload document endpoint (Forwarded to Leader or executed if Leader)
+    this._expressClient.post("/api/documents/upload", upload.single("file"), async (req, res) => {
+      if (this.state !== State.Leader) {
+        const leaderConfig = this.leaderId !== null ? this._servers.find((s) => s.index === this.leaderId) : null;
+        res.status(403).json({
+          error: "NOT_LEADER",
+          message: `Node ${this._index} is a follower. Write operations must go to the Leader.`,
+          currentLeaderId: this.leaderId,
+          leaderAddress: leaderConfig ? `http://localhost:${leaderConfig.clientPort || (5000 + (this.leaderId || 0))}` : null,
+        });
+        return;
+      }
+
+      if (!req.file) {
+        res.status(400).json({ error: "No file uploaded" });
+        return;
+      }
+
+      const fileBuffer = req.file.buffer;
+      const sha256 = crypto.createHash("sha256").update(fileBuffer).digest("hex");
+      const fileId = `${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+      const contentBase64 = fileBuffer.toString("base64");
+
+      const metadata: DocumentMetadata = {
+        fileId,
+        fileName: req.file.originalname,
+        mimeType: req.file.mimetype || "application/octet-stream",
+        size: req.file.size,
+        sha256,
+        uploadedAt: new Date().toISOString(),
+        nodeIndex: this._index,
+      };
+
       const entry: LogEntry = {
-        type: LogType.Set,
-        args: [key, value],
+        type: LogType.DocUpload,
+        args: [fileId, JSON.stringify(metadata), contentBase64],
         index: this.log.length,
         term: this.currentTerm,
       };
 
-      const result = await this.rpcAppendEntries([entry]);
-      this.log.push(entry);
-      this.logToConsole("/set", result);
-      if (result) {
-        this._store.apply([entry]);
-        this.logToConsole("/set", this._store.get(key));
+      this.logToConsole(`Leader received document: "${metadata.fileName}" (${metadata.size} bytes). Initiating Raft consensus...`);
+      
+      const quorumReached = await this.rpcAppendEntries([entry]);
+      if (quorumReached) {
+        this.log.push(entry);
+        this.commitIndex = this.log.length - 1;
+        this._docStore.saveDocument(metadata, contentBase64);
+        this.logToConsole(`Quorum confirmed for "${metadata.fileName}". Successfully committed!`);
+        res.json({
+          success: true,
+          message: "Document replicated across quorum and committed",
+          document: metadata,
+        });
+      } else {
+        res.status(500).json({
+          success: false,
+          error: "Failed to achieve cluster consensus / quorum for document replication",
+        });
+      }
+    });
+
+    // Delete document (Replicated via Raft)
+    this._expressClient.delete("/api/documents/:fileId", async (req, res) => {
+      if (this.state !== State.Leader) {
+        res.status(403).json({
+          error: "NOT_LEADER",
+          currentLeaderId: this.leaderId,
+        });
+        return;
       }
 
-      res.send("Done");
+      const fileId = req.params.fileId;
+      const entry: LogEntry = {
+        type: LogType.DocDelete,
+        args: [fileId],
+        index: this.log.length,
+        term: this.currentTerm,
+      };
+
+      const quorumReached = await this.rpcAppendEntries([entry]);
+      if (quorumReached) {
+        this.log.push(entry);
+        this.commitIndex = this.log.length - 1;
+        this._docStore.deleteDocument(fileId);
+        res.json({ success: true, message: `Document ${fileId} deleted across cluster` });
+      } else {
+        res.status(500).json({ error: "Failed to replicate delete across cluster" });
+      }
+    });
+
+    // Chaos toggle: inject artificial latency
+    this._expressClient.post("/api/chaos/latency", (req, res) => {
+      const ms = Number(req.body.ms || 0);
+      this._simulatedLatencyMs = ms;
+      this.logToConsole(`Simulated network latency set to ${ms}ms`);
+      res.json({ simulatedLatencyMs: this._simulatedLatencyMs });
     });
   }
 
   private setupRaftHandler() {
-    this._expressRaft.use(express.json());
+    this._expressRaft.use(express.json({ limit: "50mb" }));
+
     this._expressRaft.post<{}, {}, AppendEntriesParams>(
       APPEND_ENTRIES_PATH,
-      (req, res) => {
+      async (req, res) => {
+        if (this._simulatedLatencyMs > 0) {
+          await this.delay(this._simulatedLatencyMs);
+        }
         const result = this.AppendEntries(req.body);
         res.send(result);
       }
     );
+
     this._expressRaft.post<{}, {}, RequestVoteParams>(
       REQUEST_VOTE_PATH,
-      (req, res) => {
+      async (req, res) => {
+        if (this._simulatedLatencyMs > 0) {
+          await this.delay(this._simulatedLatencyMs);
+        }
         const result = this.RequestVote(req.body);
         res.send(result);
       }
@@ -186,206 +440,246 @@ export class RaftNode {
   }
 
   private async heartbeat() {
+    if (this.state !== State.Leader) return;
+
+    if (this._heartbeatTimeout) clearTimeout(this._heartbeatTimeout);
     this._heartbeatTimeout = setTimeout(() => {
       this.heartbeat();
-    }, 500);
-    this.rpcAppendEntries([
-      {
-        type: LogType.Beat,
-        args: [],
-        index: this.log.length,
-        term: this.currentTerm,
-      },
-    ]);
+    }, 800);
+
+    await this.rpcAppendEntries([], true);
   }
 
-  private async rpcAppendEntries(entries: LogEntry[]) {
+  private async rpcAppendEntries(newEntries: LogEntry[] = [], isHeartbeat: boolean = false): Promise<boolean> {
     if (this.state !== State.Leader) return false;
-    const results = await Promise.all<{
-      term: number;
-      success: boolean;
-    }>(
-      this._servers
-        .filter((s, i) => i !== this._index)
-        .map((s) =>
-          fetch(s.address + APPEND_ENTRIES_PATH, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              term: this.currentTerm,
-              leaderId: this._index,
-              prevLogIndex: this.log[this.log.length - 1].index,
-              prevLogTerm: this.log[this.log.length - 1].term,
-              entries,
-              leaderCommit: this.commitIndex,
-            }),
-          })
-            .then((res) => res.json())
-            .catch(() => ({ success: false }))
-        )
-    );
 
-    return results.every((r) => r.success);
+    const peers = this._servers.filter((s) => s.index !== this._index);
+    let successVotes = 1; // Leader itself counts as 1 vote
+    const currentDocCount = this._docStore.listDocuments().length;
+
+    const promises = peers.map(async (s) => {
+      try {
+        const followerNextIdx = this.nextIndex[s.index] !== undefined ? this.nextIndex[s.index] : 1;
+        
+        let entriesToSend: LogEntry[];
+        if (followerNextIdx < this.log.length) {
+          // Follower is missing historical entries! Send all missing entries
+          entriesToSend = this.log.slice(followerNextIdx);
+          if (newEntries.length > 0) {
+            entriesToSend = entriesToSend.concat(newEntries);
+          }
+        } else if (newEntries.length > 0) {
+          entriesToSend = newEntries;
+        } else {
+          entriesToSend = [{
+            type: LogType.Beat,
+            args: [],
+            index: this.log.length,
+            term: this.currentTerm,
+          }];
+        }
+
+        const prevLogIndex = Math.max(0, followerNextIdx - 1);
+        const prevEntry = this.log[prevLogIndex];
+        const prevLogTerm = prevEntry ? prevEntry.term : 0;
+
+        const res = await fetch(s.address + APPEND_ENTRIES_PATH, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            term: this.currentTerm,
+            leaderId: this._index,
+            prevLogIndex,
+            prevLogTerm,
+            entries: entriesToSend,
+            leaderCommit: this.commitIndex,
+            leaderDocCount: currentDocCount,
+          }),
+          signal: AbortSignal.timeout(1500),
+        });
+
+        if (res.ok) {
+          const data = (await res.json()) as { term: number; success: boolean };
+          if (data && data.success) {
+            successVotes++;
+            this.nextIndex[s.index] = this.log.length + newEntries.length;
+            this.matchIndex[s.index] = this.nextIndex[s.index] - 1;
+          }
+        }
+      } catch {
+        // Node unreachable / failed
+      }
+    });
+
+    await Promise.all(promises);
+
+    // Quorum condition: majority (e.g. > N/2)
+    const majority = Math.floor(this._servers.length / 2) + 1;
+    return successVotes >= majority;
   }
 
-  private async rpcRequestVote() {
+  private async rpcRequestVote(): Promise<boolean> {
     if (this.state !== State.Candidate) return false;
-    const results = await Promise.all<{
-      term: number;
-      voteGranted: boolean;
-    }>(
-      this._servers
-        .filter((s, i) => i !== this._index)
-        .map((s) =>
-          fetch(s.address + REQUEST_VOTE_PATH, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              term: this.currentTerm,
-              candidateId: this._index,
-              lastLogIndex: this.log.length - 1,
-              lastLogTerm: this.log[this.log.length - 1].term,
-            }),
-          })
-            .then((res) => res.json())
-            .catch(() => ({ voteGranted: null }))
-        )
-    );
 
-    // self vote
-    results.push({ term: this.currentTerm, voteGranted: true });
+    const peers = this._servers.filter((s) => s.index !== this._index);
+    let votesReceived = 1; // Votes for itself
 
-    this.logToConsole("rpcRequestVote", results);
-    return (
-      results.filter((r) => r.voteGranted !== null).filter((r) => r.voteGranted)
-        .length >
-      this._servers.length / 2
-    );
+    const promises = peers.map(async (s) => {
+      try {
+        const lastEntry = this.log[this.log.length - 1];
+        const res = await fetch(s.address + REQUEST_VOTE_PATH, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            term: this.currentTerm,
+            candidateId: this._index,
+            lastLogIndex: this.log.length - 1,
+            lastLogTerm: lastEntry ? lastEntry.term : 0,
+          }),
+          signal: AbortSignal.timeout(1200),
+        });
+
+        if (res.ok) {
+          const data = (await res.json()) as { term: number; voteGranted: boolean };
+          if (data && data.voteGranted) {
+            votesReceived++;
+          }
+        }
+      } catch {
+        // Node offline
+      }
+    });
+
+    await Promise.all(promises);
+    const majority = Math.floor(this._servers.length / 2) + 1;
+    return votesReceived >= majority;
   }
 
   private moveToLeader() {
-    this.logToConsole("Moved to leader");
     this.state = State.Leader;
+    this.leaderId = this._index;
+    if (this._leaderElectionTimeout) {
+      clearTimeout(this._leaderElectionTimeout);
+      this._leaderElectionTimeout = null;
+    }
+    this._servers.forEach((s) => {
+      if (s.index !== this._index) {
+        this.nextIndex[s.index] = 1;
+        this.matchIndex[s.index] = 0;
+      }
+    });
+    this.logToConsole(`🏆 Crowned as LEADER for Term ${this.currentTerm}! Starting heartbeats...`);
     this.heartbeat();
   }
 
   private async moveToCandidate() {
-    this.logToConsole("Moved to candidate");
     this.state = State.Candidate;
     this.currentTerm++;
-    const result = await this.rpcRequestVote();
-    if (result) {
+    this.votedFor = this._index;
+    this.logToConsole(`Election timeout expired. Transitioned to CANDIDATE for Term ${this.currentTerm}. Requesting votes...`);
+
+    const wonElection = await this.rpcRequestVote();
+    if (wonElection && this.state === State.Candidate) {
       this.moveToLeader();
     } else {
       this.state = State.Follower;
       this.resetLeaderElectionTimeout();
-      this.logToConsole("Moved back to follower");
+      this.logToConsole(`Election inconclusive. Returned to FOLLOWER.`);
     }
   }
 
-  private async resetLeaderElectionTimeout() {
+  private resetLeaderElectionTimeout() {
     if (this._leaderElectionTimeout) clearTimeout(this._leaderElectionTimeout);
+    // Randomized election timeout between 1500ms and 3000ms
+    const timeout = 1500 + Math.random() * 1500;
     this._leaderElectionTimeout = setTimeout(() => {
       this.moveToCandidate();
-    }, 1000 + Math.random() * 500);
+    }, timeout);
   }
 
   private AppendEntries({
     term,
     leaderId,
-    prevLogIndex,
-    prevLogTerm,
     entries,
     leaderCommit,
+    leaderDocCount,
   }: AppendEntriesParams): { term: number; success: boolean } {
-    this.logToConsole("AppendEntries", entries);
-    if (term === this.currentTerm && this.state === State.Candidate) {
-      this.state = State.Follower;
-    }
-
-    this.resetLeaderElectionTimeout();
-
     if (term < this.currentTerm) {
       return { term: this.currentTerm, success: false };
     }
 
-    if (
-      !this.log[prevLogIndex] ||
-      this.log[prevLogIndex].term !== prevLogTerm
-    ) {
-      return { term: this.currentTerm, success: false };
+    if (term > this.currentTerm) {
+      this.currentTerm = term;
+      this.state = State.Follower;
+      this.votedFor = null;
+      if (this._heartbeatTimeout) {
+        clearTimeout(this._heartbeatTimeout);
+        this._heartbeatTimeout = null;
+      }
+    } else if (this.state === State.Candidate) {
+      this.state = State.Follower;
     }
 
-    if (!entries.filter((e) => e.type !== LogType.Beat).length) {
-      // simple heartbeat
-      return { term: this.currentTerm, success: true };
+    this.leaderId = leaderId;
+    this.resetLeaderElectionTimeout();
+
+    const nonHeartbeatEntries = entries.filter((e) => e.type !== LogType.Beat);
+    if (nonHeartbeatEntries.length > 0) {
+      for (const entry of nonHeartbeatEntries) {
+        if (entry.type === LogType.DocUpload) {
+          const fileId = entry.args[0];
+          const meta: DocumentMetadata = JSON.parse(entry.args[1]);
+          const contentBase64 = entry.args[2];
+          this._docStore.saveDocument(meta, contentBase64);
+          
+          const alreadyInLog = this.log.some(
+            (l) => l.type === LogType.DocUpload && l.args[0] === fileId
+          );
+          if (!alreadyInLog) {
+            this.log.push(entry);
+          }
+          this.logToConsole(`Replicated and saved document: ${meta.fileName} (id: ${fileId})`);
+        } else if (entry.type === LogType.DocDelete) {
+          const fileId = entry.args[0];
+          this._docStore.deleteDocument(fileId);
+          this.log.push(entry);
+          this.logToConsole(`Replicated deletion of document: ${fileId}`);
+        }
+      }
+      this.commitIndex = Math.min(leaderCommit, this.log.length - 1);
+    } else {
+      this.commitIndex = Math.min(leaderCommit, this.log.length - 1);
     }
 
-    this.log.push(...entries);
-    this._store.apply(entries);
-    this.commitIndex = Math.min(leaderCommit, this.log.length - 1);
+    // Proactive check: if leader has more documents than us, trigger catch-up sync
+    if (leaderDocCount !== undefined && leaderDocCount > this._docStore.listDocuments().length) {
+      this.syncFromLeader(leaderId);
+    }
+
     return { term: this.currentTerm, success: true };
   }
 
   private RequestVote({
     term,
     candidateId,
-    lastLogIndex,
-    lastLogTerm,
   }: RequestVoteParams): { term: number; voteGranted: boolean } {
-    this.logToConsole(
-      "RequestVote",
-      term,
-      this.currentTerm,
-      candidateId,
-      lastLogIndex,
-      lastLogTerm,
-      this.log.length - 1
-    );
-
     if (term < this.currentTerm) {
       return { term: this.currentTerm, voteGranted: false };
     }
 
-    const oldTerm = this.currentTerm;
-
     if (term > this.currentTerm) {
       this.currentTerm = term;
       this.state = State.Follower;
-      if (this._leaderElectionTimeout)
-        clearTimeout(this._leaderElectionTimeout);
+      this.votedFor = null;
     }
 
-    if (
-      !this.votedFor &&
-      !(
-        lastLogTerm > this.log[this.log.length - 1].term ||
-        (lastLogTerm === this.log[this.log.length - 1].term &&
-          lastLogIndex >= this.log.length - 1)
-      )
-    ) {
-      return {
-        term: this.currentTerm,
-        voteGranted: false,
-      };
+    if (this.votedFor === null || this.votedFor === candidateId) {
+      this.votedFor = candidateId;
+      this.resetLeaderElectionTimeout();
+      this.logToConsole(`Voted YES for candidate Node ${candidateId} in Term ${term}`);
+      return { term: this.currentTerm, voteGranted: true };
     }
 
-    if (this.votedFor && term === oldTerm) {
-      return {
-        term: this.currentTerm,
-        voteGranted: false,
-      };
-    }
-
-    this.votedFor = candidateId;
-
-    return {
-      term: this.currentTerm,
-      voteGranted: true,
-    };
+    return { term: this.currentTerm, voteGranted: false };
   }
 }
